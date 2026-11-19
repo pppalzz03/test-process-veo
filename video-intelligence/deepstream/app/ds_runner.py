@@ -228,16 +228,35 @@ def run_pipeline(args: argparse.Namespace) -> int:
 
     bus = pipeline.get_bus()
     try:
-        pipeline.set_state(Gst.State.PAUSED)
-        msg = bus.timed_pop_filtered(
-            120 * Gst.SECOND, Gst.MessageType.ASYNC_DONE | Gst.MessageType.ERROR
-        )
-        code = _check_error(msg, GLib, Gst)
-        if code is not None:
-            return code
-        if msg is None:
-            log("pipeline did not reach PAUSED within 120s")
-            return EXIT_PIPELINE
+        ret = pipeline.set_state(Gst.State.PAUSED)
+        if ret == Gst.StateChangeReturn.ASYNC:
+            msg = bus.timed_pop_filtered(
+                120 * Gst.SECOND, Gst.MessageType.ASYNC_DONE | Gst.MessageType.ERROR
+            )
+            code = _check_error(msg, GLib, Gst)
+            if code is not None:
+                return code
+            if msg is None:
+                log("pipeline did not reach PAUSED within 120s")
+                return EXIT_PIPELINE
+        else:
+            # The sink has async=false, so the state change completes without ASYNC_DONE ever
+            # being posted (waiting for it hung for 120 s on the first real GPU run). Wait on
+            # the state itself and surface any error already queued on the bus.
+            msg = bus.timed_pop_filtered(
+                0 if ret == Gst.StateChangeReturn.SUCCESS else 5 * Gst.SECOND,
+                Gst.MessageType.ERROR,
+            )
+            code = _check_error(msg, GLib, Gst)
+            if code is not None:
+                return code
+            state_ret, _, _ = pipeline.get_state(120 * Gst.SECOND)
+            if state_ret == Gst.StateChangeReturn.FAILURE:
+                msg = bus.timed_pop_filtered(5 * Gst.SECOND, Gst.MessageType.ERROR)
+                return _check_error(msg, GLib, Gst) or EXIT_PIPELINE
+            if state_ret == Gst.StateChangeReturn.ASYNC:
+                log("pipeline did not reach PAUSED within 120s")
+                return EXIT_PIPELINE
 
         flags = Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE
         if not pipeline.seek(
