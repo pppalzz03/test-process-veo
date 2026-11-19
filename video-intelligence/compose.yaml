@@ -1,0 +1,129 @@
+# Production-shaped Compose file for the DGX Spark (ARM64). Does NOT touch existing containers or
+# vLLM: it only creates its own network/volumes. Never run `down -v` without a database backup.
+name: video-intelligence
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://${POSTGRES_USER:-vi}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-vi}
+  RABBITMQ_URL: amqp://${RABBITMQ_USER:-vi}:${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/%2F
+  MEDIA_ROOT: /data/media
+  API_KEY: ${API_KEY:-}
+  MODEL_VERSION: ${MODEL_VERSION:-yolo-unspecified}
+  SEGMENT_SECONDS: ${SEGMENT_SECONDS:-300}
+  MIN_CONFIDENCE: ${MIN_CONFIDENCE:-0.25}
+  MAX_ATTEMPTS: ${MAX_ATTEMPTS:-4}
+  GPU_MAX_CONCURRENT_STREAMS: ${GPU_MAX_CONCURRENT_STREAMS:-1}
+  GPU_MIN_AVAILABLE_MEM_MB: ${GPU_MIN_AVAILABLE_MEM_MB:-8192}
+  DS_INFER_CONFIG: ${DS_INFER_CONFIG:-/opt/vi/deepstream/configs/config_infer_primary_yolo.txt}
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "20m", max-file: "5"}
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-vi}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-vi}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/90-video.conf:ro
+    ports:
+      - "127.0.0.1:15672:15672"   # management UI, localhost only
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    logging: *logging
+
+  migrate:
+    build: {context: ., dockerfile: docker/app.Dockerfile}
+    command: ["python", "-m", "shared.database.migrate"]
+    environment: *app-env
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  api:
+    build: {context: ., dockerfile: docker/app.Dockerfile}
+    command: ["uvicorn", "--factory", "services.api.main:app_factory", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    environment: *app-env
+    volumes:
+      - ${MEDIA_DIR:-./data/media}:/data/media
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    logging: *logging
+
+  scheduler:   # outbox relay + lease reaper + GPU slot housekeeping
+    build: {context: ., dockerfile: docker/app.Dockerfile}
+    command: ["python", "-m", "services.scheduler.main"]
+    restart: unless-stopped
+    environment: *app-env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-m", "shared.database.heartbeat", "scheduler", "30"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+    logging: *logging
+
+  worker:      # DeepStream + YOLO TensorRT. Scale with `--scale worker=N` (GPU slots cap real concurrency)
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+      args:
+        DEEPSTREAM_IMAGE: ${DEEPSTREAM_IMAGE:-ghcr.io/nvidia/deepstream:9.2-triton-sbsa-dgx-spark}
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      <<: *app-env
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      RUNNER_COMMAND: /opt/venv/bin/python /opt/vi/deepstream/app/ds_runner.py
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, count: all, capabilities: [gpu, video]}
+    volumes:
+      - ${MEDIA_DIR:-./data/media}:/data/media:ro
+      - ${MODELS_DIR:-./deepstream/models}:/opt/vi/models
+      - ./benchmarks:/app/benchmarks   # benchmark scripts write results here
+    stop_grace_period: 60s   # lets the worker hand the running job back cleanly on SIGTERM
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+      scheduler: {condition: service_started}
+    logging: *logging
+
+volumes:
+  pgdata:
+  rabbitmq-data:
