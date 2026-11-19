@@ -6,7 +6,13 @@ FROM ${DEEPSTREAM_IMAGE}
 ENV USE_NEW_NVSTREAMMUX=yes \
     PYTHONUNBUFFERED=1
 
+# The DeepStream image strips some codec libraries (libvpx etc.) while their packages stay
+# "installed", so ffprobe failed with "libvpx.so.9: cannot open shared object file" on the Spark.
+# Reinstalling restores the files; `ffprobe -version` fails the build if anything else is missing
+# (it needs no GPU, unlike `import pyds`).
 RUN apt-get update && apt-get install -y --no-install-recommends python3-venv g++ make ffmpeg \
+    && apt-get install -y --no-install-recommends --reinstall libvpx9 \
+    && ffprobe -version >/dev/null \
     && rm -rf /var/lib/apt/lists/*
 
 # --system-site-packages so the container's GStreamer bindings (gi) and pyds are visible.

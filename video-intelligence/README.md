@@ -25,8 +25,8 @@ for them (see `docs/architecture.md`).
 | YOLO decode logic (C++) | **Compiled and tested on host** | `make -C deepstream/parser test` |
 | `docker compose config` | **Valid** | no daemon in the authoring sandbox, so nothing was built or started |
 | **RabbitMQ publisher/consumer/topology against a real broker** | **NOT RUN** (tests written, skipped) | `tests/integration/test_rabbitmq.py` |
-| **DeepStream pipeline (`ds_runner.py`), hardware decode, TensorRT engine, tracker, custom parser glue** | **NOT RUN** (no GPU/DGX Spark/model/video available) | needs `docs/deployment.md` sections 1-4 |
-| **Docker images build** | **NOT RUN** | `docker compose build` |
+| DeepStream 9.2 pipeline (`ds_runner.py`): HW decode path, TensorRT FP16 engine (YOLO26n), NvDCF tracker, custom parser, segment seek | **Run on the DGX Spark** for one 180 s 60 fps H.264 video; 10 s segment timestamps match ffprobe (0 frames > 2 ms off) | `docs/environment-report.md` section 5 |
+| Docker images build | **worker image built on the Spark** (api image not yet) | `docker compose build` |
 | 1-hour video end to end, recovery tests on the Spark, vLLM-untouched check | **NOT RUN** | `docs/deployment.md` section 6 |
 | **Benchmarks** | **NOT RUN, no numbers exist** | `docs/benchmark-report.md` |
 

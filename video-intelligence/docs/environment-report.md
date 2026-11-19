@@ -1,16 +1,8 @@
 # Environment report (Phase 1)
 
-**Status: Phase 1 was NOT executed on the DGX Spark.** The session was linked to a MacBook Pro
-(macOS, arm64) with an empty project folder, not to the DGX Spark. Everything below is
-therefore split into three clearly separated kinds of statement:
-
-| Kind | Meaning |
-|---|---|
-| **Observed** | Seen by commands I ran, in the authoring sandbox (not the Spark) |
-| **Documented** | Taken from NVIDIA documentation (links at the bottom) |
-| **Pending on Spark** | Must be confirmed by running `scripts/env_check.sh` on the DGX Spark |
-
-Nothing here may be read as a measurement of the Spark.
+**Status (2026-11-19): Phase 1 executed on the DGX Spark; see section 5 for measured results.**
+Sections 1-4 were written before access to the Spark and are kept for context; where they
+disagree with section 5, section 5 (measured on the machine) wins.
 
 ## 1. What was observed (authoring sandbox, NOT the DGX Spark)
 
@@ -102,23 +94,75 @@ Flow: `export_yolo.py` (on the Spark) -> `inspect_yolo_model.py` confirms the la
 count -> set `num-detected-classes` -> `build_engine.sh` builds the FP16 TensorRT engine once.
 `.engine` files must never be copied between machines.
 
-## 5. Checklist to complete Phase 1 on the DGX Spark
+## 5. Results measured on the DGX Spark (2026-11-19, host `spark-396a`)
 
-Run `scripts/env_check.sh --container-test` and paste the output below this line. Phase 1 is
-complete only when all of these are true:
+Everything below was observed on the real machine; nothing is estimated.
 
-- [ ] `nvidia-smi` shows GB10 and the driver; vLLM processes are listed and **unchanged**
-- [ ] `docker info` lists the `nvidia` runtime; `docker run --gpus all ... nvidia-smi -L` works
-- [ ] DeepStream image pulled; `deepstream-app --version-all` prints versions (record them here)
-- [x] `pyds` is absent from the 9.2 image; built from source via `user_deepstream_python_apps_install.sh --build-bindings` -> pyds 1.2.3 (verified on the Spark, 2026-11-19). `pyservicemaker` 0.0.1 is present but needs `pyyaml`.
-- [ ] `gst-inspect-1.0 nvv4l2decoder nvstreammux nvinfer nvtracker` all succeed
-- [ ] Tracker library and sample tracker YAML exist at the configured paths
-- [ ] `/opt/nvidia/deepstream/deepstream/sources/includes/nvdsinfer_custom_impl.h` exists
-- [ ] MemAvailable noted before and after a run, to set `GPU_MIN_AVAILABLE_MEM_MB`
+### Phase 1 checklist
 
-### Output from the DGX Spark
+- [x] `nvidia-smi`: GB10, driver 580.178.04, CUDA 13.0. Two vLLM `EngineCore` processes
+      (~15 GB and ~40.5 GB) were running throughout and were **not touched**
+- [x] `nvidia` runtime present; `docker run --gpus all ... nvidia-smi -L` inside the DS image
+      shows `NVIDIA GB10`
+- [x] `ghcr.io/nvidia/deepstream:9.2-triton-sbsa-dgx-spark` pulled without login. The image
+      runs in **CUDA forward-compatibility mode** (CUDA 13.2 user-mode driver 595.58.03 on the
+      580.178.04 kernel driver), which closes open risk 1: the 9.1 fallback is not needed
+- [x] TensorRT 10.16.1.11 (+cuda13.2), `trtexec` present
+- [x] `gst-inspect-1.0`: `nvv4l2decoder`, `nvstreammux`, `nvinfer`, `nvtracker` present
+- [x] `libnvds_nvmultiobjecttracker.so` and the sample tracker YAMLs (incl.
+      `config_tracker_NvDCF_perf.yml`) exist at the configured paths (risk 5 closed)
+- [x] `nvdsinfer_custom_impl.h` exists; the custom parser compiles in the worker image (risk 6
+      closed for compilation; decoding verified by real detections, see below)
+- [x] `pyds` is absent from the 9.2 image and has no prebuilt wheel for 9.x (latest release
+      v1.2.2 targets DS 8.0). Built from source in the worker image via
+      `user_deepstream_python_apps_install.sh --build-bindings` -> pyds 1.2.3 (risk 2 closed).
+      `import pyds` needs `libcuda.so.1`, so it can only be checked at run time, not during
+      `docker build`. `pyservicemaker` 0.0.1 is present but needs `pyyaml`
+- [ ] MemAvailable before/after a run (to tune `GPU_MIN_AVAILABLE_MEM_MB`): not yet recorded
 
-_Not yet collected._
+### Model
+
+- The prebuilt Ultralytics engines (`yolo26n_fp16_b8/b16_640.engine`) were **not** used: they
+  carry an Ultralytics metadata header, were built for batch 8/16 and for an unknown TensorRT
+  version. The engine is built by nvinfer from ONNX inside the DS container instead.
+- The first ONNX tried failed to build in TensorRT 10.16
+  (`ISliceLayer /model.2/Split ... out of bounds access on axis 0`). Re-exporting `yolo26n.pt`
+  with the `ultralytics/ultralytics:latest-nvidia-arm64` image
+  (`imgsz=640 batch=1 dynamic=False simplify=True opset=17 half=False`) fixed it.
+- FP16 engine `yolo_e2e.onnx_b1_gpu0_fp16.engine` built by nvinfer in **~14 s**, with
+  `config_infer_primary_yolo_e2e.txt` (end-to-end layout, `cluster-mode=4`).
+- Still to record: the output shape printed by `scripts/inspect_yolo_model.py`.
+
+### Phase 2 pipeline on `output.mp4` (H.264 High, 2858x1350, 60 fps, 180.75 s, 10,845 frames)
+
+| Check | Result |
+|---|---|
+| Decode path | `qtdemux ! h264parse ! nvv4l2decoder` (hardware path selected; `dec` utilisation not yet captured with `nvidia-smi dmon`) |
+| Full file, one run | 10,845 frames emitted (= ffprobe `nb_frames`), pts 33 ms .. 180,766 ms, 9,611 frames with detections |
+| Segment [60000, 70000) ms | 598 frames, 2 preroll frames dropped, `seek on demux` used, runner exit 0 |
+| `validate_timestamps.py` (tolerance 2 ms) | ffprobe 600 / runner 598, ratio 0.997, **0 frames off by more than 2 ms -> TIMESTAMPS OK** (risk 4 closed for this file) |
+| Wall time of that 10 s segment | 20.6 s including process start, engine deserialisation and pipeline setup. This is NOT a throughput benchmark |
+
+Two of the 600 frames in the window are not emitted (ratio 0.997, within the 2% gate). Not yet
+investigated; likely the first frames at the window start after the ACCURATE seek.
+
+### Defects found and fixed on the first GPU runs
+
+1. The DS image entrypoint re-splits arguments, breaking `docker run IMAGE bash -lc '...'`;
+   use `--entrypoint bash` (fixed in `env_check.sh`).
+2. `GLib.Error.domain` is already a `str`; `quark_to_string()` raised `TypeError` and masked
+   the real pipeline error (fixed, unit-tested).
+3. With `fakesink async=false` the state change never posts `ASYNC_DONE`; the runner waited
+   120 s and gave up. It now waits on the pipeline state (fixed).
+4. `nvstreammux` `printf`s (`max_fps_dur ...`) to fd 1 and corrupted the NDJSON stream. The
+   runner now writes the protocol to a private duplicate of stdout and points fd 1 at stderr
+   (fixed, unit-tested with a subprocess).
+5. A pipeline-level seek is not forwarded through `nvstreammux`: a 10 s window decoded the
+   whole 180 s file. The seek is now sent to `qtdemux`, and frames outside the window are
+   dropped and counted (`dropped` in the summary) (fixed, unit-tested).
+6. `ffprobe` in the worker image failed with `libvpx.so.9: cannot open shared object file`
+   (the DS image strips codec libraries). The Dockerfile reinstalls `libvpx9` and checks
+   `ffprobe -version` at build time (fix written; rebuild pending).
 
 ## Sources
 
