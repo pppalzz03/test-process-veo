@@ -102,6 +102,33 @@ def build_launch_string(args: argparse.Namespace, decode_path: str) -> str:
     )
 
 
+def seek_segment(pipeline, Gst, start_ms: int, end_ms: int) -> bool:  # type: ignore[no-untyped-def]
+    """Seek [start_ms, end_ms) at the SOURCE side of the pipeline.
+
+    A pipeline-level seek travels upstream from the sink and nvstreammux does not forward it:
+    on the first GPU run the whole 180 s file was decoded for a 10 s window. DeepStream's own
+    reference apps seek the source/demux element instead, which is what we do; the pipeline
+    seek is only a fallback (e.g. the uridecodebin software path).
+    """
+    flags = Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE
+    seek_args = (
+        1.0,
+        Gst.Format.TIME,
+        flags,
+        Gst.SeekType.SET,
+        start_ms * Gst.MSECOND,
+        Gst.SeekType.SET,
+        end_ms * Gst.MSECOND,
+    )
+    demux = pipeline.get_by_name("demux")
+    if demux is not None and demux.seek(*seek_args):
+        log(f"seek on demux to [{start_ms}, {end_ms}) ms")
+        return True
+    ok = bool(pipeline.seek(*seek_args))
+    log(f"seek on pipeline to [{start_ms}, {end_ms}) ms: {'ok' if ok else 'FAILED'}")
+    return ok
+
+
 def set_if_present(element, name: str, value) -> None:  # type: ignore[no-untyped-def]
     """The legacy and new nvstreammux (and nvtracker versions) expose different properties."""
     if element.find_property(name) is not None:
@@ -111,11 +138,18 @@ def set_if_present(element, name: str, value) -> None:  # type: ignore[no-untype
 class FrameEmitter:
     """Pad probe: converts DeepStream metadata into NDJSON frame records."""
 
-    def __init__(self, pyds, labels: list[str], out=None) -> None:  # type: ignore[no-untyped-def]
+    def __init__(  # type: ignore[no-untyped-def]
+        self, pyds, labels: list[str], out=None, window_ns: tuple[int, int] | None = None
+    ) -> None:
         self._pyds, self._labels = pyds, labels
         self._out = out if out is not None else sys.stdout
+        self._window = window_ns
         self._lock = threading.Lock()
         self.frames = 0
+        self.dropped = 0  # frames outside [start, end): prerolled before the seek took effect
+
+    def in_window(self, pts_ns: int) -> bool:
+        return self._window is None or self._window[0] <= pts_ns < self._window[1]
 
     def __call__(self, pad, info, _user_data):  # type: ignore[no-untyped-def]
         from gi.repository import Gst
@@ -128,6 +162,11 @@ class FrameEmitter:
         frame_item = batch_meta.frame_meta_list
         while frame_item is not None:
             frame_meta = pyds.NvDsFrameMeta.cast(frame_item.data)
+            if not self.in_window(int(frame_meta.buf_pts)):
+                with self._lock:
+                    self.dropped += 1
+                frame_item = frame_item.next
+                continue
             objects = []
             obj_item = frame_meta.obj_meta_list
             while obj_item is not None:
@@ -236,7 +275,8 @@ def run_pipeline(args: argparse.Namespace) -> int:
     pgie = pipeline.get_by_name("pgie")
     set_if_present(pgie, "interval", args.infer_interval)
 
-    emitter = FrameEmitter(pyds, load_labels(args.labels), protocol_out)
+    window_ns = (args.start_ms * 1_000_000, args.end_ms * 1_000_000)
+    emitter = FrameEmitter(pyds, load_labels(args.labels), protocol_out, window_ns)
     pipeline.get_by_name("tracker").get_static_pad("src").add_probe(
         Gst.PadProbeType.BUFFER, emitter, None
     )
@@ -273,16 +313,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 log("pipeline did not reach PAUSED within 120s")
                 return EXIT_PIPELINE
 
-        flags = Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE
-        if not pipeline.seek(
-            1.0,
-            Gst.Format.TIME,
-            flags,
-            Gst.SeekType.SET,
-            args.start_ms * Gst.MSECOND,
-            Gst.SeekType.SET,
-            args.end_ms * Gst.MSECOND,
-        ):
+        if not seek_segment(pipeline, Gst, args.start_ms, args.end_ms):
             log("segment seek failed")
             return EXIT_PIPELINE
         pipeline.set_state(Gst.State.PLAYING)
@@ -299,8 +330,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
     finally:
         pipeline.set_state(Gst.State.NULL)
 
+    if emitter.dropped:
+        log(f"dropped {emitter.dropped} frames outside the window (preroll before the seek)")
     protocol_out.write(
-        json.dumps({"type": "summary", "frames": emitter.frames, "eos": True}) + "\n"
+        json.dumps(
+            {"type": "summary", "frames": emitter.frames, "eos": True, "dropped": emitter.dropped}
+        )
+        + "\n"
     )
     protocol_out.flush()
     log(f"EOS after {emitter.frames} frames")

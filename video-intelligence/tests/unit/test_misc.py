@@ -196,3 +196,65 @@ def test_native_stdout_noise_does_not_reach_the_protocol_stream() -> None:
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert r.stdout == '{"type":"summary"}\n'
     assert "max_fps_dur" in r.stderr
+
+
+def test_frame_window_is_half_open() -> None:
+    from deepstream.app.ds_runner import FrameEmitter
+
+    e = FrameEmitter(pyds=None, labels=[], out=None, window_ns=(60_000_000_000, 70_000_000_000))
+    assert not e.in_window(33_000_000)  # preroll frame from the start of the file
+    assert e.in_window(60_000_000_000)
+    assert e.in_window(69_999_999_999)
+    assert not e.in_window(70_000_000_000)
+    assert FrameEmitter(pyds=None, labels=[]).in_window(0)  # no window: keep everything
+
+
+class _FakeGst:
+    MSECOND = 1_000_000
+
+    class SeekFlags:
+        FLUSH, ACCURATE = 1, 2
+
+    class Format:
+        TIME = 3
+
+    class SeekType:
+        SET = 1
+
+
+class _Seekable:
+    def __init__(self, ok: bool) -> None:
+        self.ok, self.calls = ok, []
+
+    def seek(self, *args):  # type: ignore[no-untyped-def]
+        self.calls.append(args)
+        return self.ok
+
+
+class _FakePipeline(_Seekable):
+    def __init__(self, ok: bool, demux: _Seekable | None) -> None:
+        super().__init__(ok)
+        self.demux = demux
+
+    def get_by_name(self, name: str):  # type: ignore[no-untyped-def]
+        return self.demux if name == "demux" else None
+
+
+def test_seek_goes_to_the_demuxer_not_the_pipeline() -> None:
+    from deepstream.app.ds_runner import seek_segment
+
+    demux = _Seekable(ok=True)
+    pipe = _FakePipeline(ok=True, demux=demux)
+    assert seek_segment(pipe, _FakeGst, 60_000, 70_000)
+    assert demux.calls and not pipe.calls
+    assert demux.calls[0][4] == 60_000 * _FakeGst.MSECOND
+    assert demux.calls[0][6] == 70_000 * _FakeGst.MSECOND
+
+
+def test_seek_falls_back_to_pipeline_without_demuxer() -> None:
+    from deepstream.app.ds_runner import seek_segment
+
+    pipe = _FakePipeline(ok=True, demux=None)
+    assert seek_segment(pipe, _FakeGst, 0, 1000)
+    assert pipe.calls
+    assert not seek_segment(_FakePipeline(ok=False, demux=_Seekable(ok=False)), _FakeGst, 0, 1)

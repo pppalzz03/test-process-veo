@@ -5,6 +5,11 @@ This closes the main open risk in Phase 2: nvstreammux may rewrite buffer PTS. R
 
   python scripts/validate_timestamps.py /data/media/sample.mp4 --start-ms 60000 --end-ms 70000
 
+or compare an NDJSON file the runner already produced (e.g. on the host, where ffprobe works):
+
+  python3 scripts/validate_timestamps.py data/media/output.mp4 --start-ms 60000 --end-ms 70000 \
+      --runner-ndjson /tmp/vi/seg.ndjson
+
 Compares the NDJSON frames produced by deepstream/app/ds_runner.py with `ffprobe -show_frames`
 over the same window. Exit code 0 only if every runner frame lies within TOLERANCE_MS of a real
 frame and the frame counts agree within 2%.
@@ -49,7 +54,17 @@ def ffprobe_pts_ms(video: str, start_ms: int, end_ms: int) -> list[int]:
     return [t for t in times if start_ms <= t < end_ms]
 
 
+def frames_pts_ms(lines: list[str], start_ms: int, end_ms: int) -> list[int]:
+    frames = [json.loads(line) for line in lines if line.strip()]
+    return sorted(
+        f["pts_ms"] for f in frames if f["type"] == "frame" and start_ms <= f["pts_ms"] < end_ms
+    )
+
+
 def runner_pts_ms(args: argparse.Namespace) -> list[int]:
+    if args.runner_ndjson:
+        with open(args.runner_ndjson, encoding="utf-8") as fh:
+            return frames_pts_ms(fh.readlines(), args.start_ms, args.end_ms)
     cmd = shlex.split(
         os.environ.get("RUNNER_COMMAND", "/opt/venv/bin/python /opt/vi/deepstream/app/ds_runner.py")
     )
@@ -75,12 +90,7 @@ def runner_pts_ms(args: argparse.Namespace) -> list[int]:
     if proc.returncode != 0:
         print(proc.stderr[-2000:], file=sys.stderr)
         raise SystemExit(f"runner failed with exit code {proc.returncode}")
-    frames = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
-    return sorted(
-        f["pts_ms"]
-        for f in frames
-        if f["type"] == "frame" and args.start_ms <= f["pts_ms"] < args.end_ms
-    )
+    return frames_pts_ms(proc.stdout.splitlines(), args.start_ms, args.end_ms)
 
 
 def main() -> int:
@@ -89,6 +99,7 @@ def main() -> int:
     p.add_argument("--start-ms", type=int, default=0)
     p.add_argument("--end-ms", type=int, required=True)
     p.add_argument("--codec", default=None)
+    p.add_argument("--runner-ndjson", default=None, help="use this runner output, do not run it")
     p.add_argument(
         "--infer-config",
         default=os.environ.get(
