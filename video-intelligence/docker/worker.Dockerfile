@@ -6,14 +6,26 @@ FROM ${DEEPSTREAM_IMAGE}
 ENV USE_NEW_NVSTREAMMUX=yes \
     PYTHONUNBUFFERED=1
 
-# The DeepStream image strips some codec libraries (libvpx etc.) while their packages stay
-# "installed", so ffprobe failed with "libvpx.so.9: cannot open shared object file" on the Spark.
-# Reinstalling restores the files; `ffprobe -version` fails the build if anything else is missing
-# (it needs no GPU, unlike `import pyds`).
 RUN apt-get update && apt-get install -y --no-install-recommends python3-venv g++ make ffmpeg \
-    && apt-get install -y --no-install-recommends --reinstall libvpx9 \
-    && ffprobe -version >/dev/null \
     && rm -rf /var/lib/apt/lists/*
+
+# The DeepStream image deletes some codec libraries (libvpx, libmp3lame, libFLAC, ...) while
+# their packages stay registered as installed, so ffprobe exited 127 on the Spark
+# ("libvpx.so.9: cannot open shared object file"). Find every missing library with ldd, map
+# it to its package with dpkg -S, reinstall those packages, and repeat until none is missing.
+# The final `ffprobe -version` fails the build loudly if that did not work (it needs no GPU).
+RUN set -eu; apt-get update; \
+    for pass in 1 2 3 4; do \
+      missing="$(ldd /usr/bin/ffprobe | awk '/not found/ {print $1}' | sort -u)"; \
+      [ -z "$missing" ] && break; \
+      echo "pass $pass missing: $missing"; \
+      pkgs="$(for lib in $missing; do dpkg -S "$lib" 2>/dev/null | head -n1 | cut -d: -f1; done | sort -u)"; \
+      echo "reinstalling: $pkgs"; \
+      [ -n "$pkgs" ] || { echo "no package owns: $missing" >&2; exit 1; }; \
+      apt-get install -y --no-install-recommends --reinstall $pkgs; \
+    done; \
+    ffprobe -version | head -n1; ffprobe -version >/dev/null; \
+    rm -rf /var/lib/apt/lists/*
 
 # --system-site-packages so the container's GStreamer bindings (gi) and pyds are visible.
 RUN python3 -m venv --system-site-packages /opt/venv
