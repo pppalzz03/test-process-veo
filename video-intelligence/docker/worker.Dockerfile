@@ -21,8 +21,11 @@ RUN set -eux; \
     PYDS_SO="$(find /opt/nvidia/deepstream/ -path '*site-packages*' -name 'pyds*.so' | head -n1)"; \
     echo "found: $PYDS_SO"; test -n "$PYDS_SO"; \
     dirname "$PYDS_SO" > /opt/venv/lib/python3.12/site-packages/pyds_path.pth; \
-    cat /opt/venv/lib/python3.12/site-packages/pyds_path.pth; \
-    /opt/venv/bin/python -c "import pyds; print('pyds', pyds.__file__)"
+    cat /opt/venv/lib/python3.12/site-packages/pyds_path.pth
+# NOTE: do not `import pyds` here. It links libcuda.so.1, which only exists at container run time
+# (NVIDIA runtime injects it); `docker build` has no GPU. Verify at run time instead:
+#   docker run --rm --runtime=nvidia --gpus all --entrypoint /opt/venv/bin/python \
+#     video-intelligence-worker -c "import pyds; print(pyds.__file__)"
 
 WORKDIR /app
 COPY pyproject.toml ./
