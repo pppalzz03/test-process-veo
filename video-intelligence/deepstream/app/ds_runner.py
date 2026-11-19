@@ -26,6 +26,19 @@ UNTRACKED_OBJECT_ID = 0xFFFFFFFFFFFFFFFF
 HW_CODEC_PARSERS = {"h264": "h264parse", "hevc": "h265parse"}
 
 
+def claim_protocol_stdout():  # type: ignore[no-untyped-def]
+    """Return a private writer for the NDJSON protocol and point fd 1 at stderr.
+
+    DeepStream's native plugins printf() to fd 1 (e.g. nvstreammux prints "max_fps_dur ...").
+    That polluted the NDJSON stream on the first real GPU run, so the protocol now uses a
+    duplicate of the original stdout and everything else written to fd 1 lands in stderr.
+    """
+    sys.stdout.flush()
+    out = os.fdopen(os.dup(1), "w", buffering=1)
+    os.dup2(2, 1)
+    return out
+
+
 def log(message: str) -> None:
     print(f"[ds_runner] {message}", file=sys.stderr, flush=True)
 
@@ -98,8 +111,9 @@ def set_if_present(element, name: str, value) -> None:  # type: ignore[no-untype
 class FrameEmitter:
     """Pad probe: converts DeepStream metadata into NDJSON frame records."""
 
-    def __init__(self, pyds, labels: list[str]) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, pyds, labels: list[str], out=None) -> None:  # type: ignore[no-untyped-def]
         self._pyds, self._labels = pyds, labels
+        self._out = out if out is not None else sys.stdout
         self._lock = threading.Lock()
         self.frames = 0
 
@@ -128,8 +142,8 @@ class FrameEmitter:
                 "objects": objects,
             }
             with self._lock:
-                sys.stdout.write(json.dumps(record, separators=(",", ":")) + "\n")
-                sys.stdout.flush()
+                self._out.write(json.dumps(record, separators=(",", ":")) + "\n")
+                self._out.flush()
                 self.frames += 1
             frame_item = frame_item.next
         return Gst.PadProbeReturn.OK
@@ -174,6 +188,7 @@ def classify_gst_error(domain: str, message: str) -> int:
 
 
 def run_pipeline(args: argparse.Namespace) -> int:
+    protocol_out = claim_protocol_stdout()
     try:
         import gi
 
@@ -221,7 +236,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     pgie = pipeline.get_by_name("pgie")
     set_if_present(pgie, "interval", args.infer_interval)
 
-    emitter = FrameEmitter(pyds, load_labels(args.labels))
+    emitter = FrameEmitter(pyds, load_labels(args.labels), protocol_out)
     pipeline.get_by_name("tracker").get_static_pad("src").add_probe(
         Gst.PadProbeType.BUFFER, emitter, None
     )
@@ -284,7 +299,10 @@ def run_pipeline(args: argparse.Namespace) -> int:
     finally:
         pipeline.set_state(Gst.State.NULL)
 
-    print(json.dumps({"type": "summary", "frames": emitter.frames, "eos": True}), flush=True)
+    protocol_out.write(
+        json.dumps({"type": "summary", "frames": emitter.frames, "eos": True}) + "\n"
+    )
+    protocol_out.flush()
     log(f"EOS after {emitter.frames} frames")
     return EXIT_OK
 

@@ -175,3 +175,24 @@ def test_gst_error_domain_accepts_str_and_quark() -> None:
 
     assert gst_error_domain("gst-stream-error-quark", FakeGLib) == "gst-stream-error-quark"
     assert gst_error_domain(42, FakeGLib) == "decoded"
+
+
+def test_native_stdout_noise_does_not_reach_the_protocol_stream() -> None:
+    """nvstreammux printf()s to fd 1; the NDJSON channel must stay clean."""
+    import subprocess
+    import sys
+    import textwrap
+
+    code = textwrap.dedent(
+        """
+        import os, sys
+        sys.path.insert(0, "deepstream/app")
+        import ds_runner
+        out = ds_runner.claim_protocol_stdout()
+        os.write(1, b"max_fps_dur 8.3e+06 min_fps_dur 2e+08\\n")
+        out.write('{"type":"summary"}\\n'); out.flush()
+        """
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert r.stdout == '{"type":"summary"}\n'
+    assert "max_fps_dur" in r.stderr
