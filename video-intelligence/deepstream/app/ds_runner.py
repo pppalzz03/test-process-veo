@@ -159,6 +159,12 @@ class FrameEmitter:
         }
 
 
+def gst_error_domain(domain, glib) -> str:  # type: ignore[no-untyped-def]
+    """GLib.Error.domain is already a str in PyGObject; only a raw GQuark (int) needs decoding.
+    (Calling quark_to_string on the str raised TypeError on the first real GPU run.)"""
+    return domain if isinstance(domain, str) else str(glib.quark_to_string(domain))
+
+
 def classify_gst_error(domain: str, message: str) -> int:
     if "NvDsInferContext" in message or "config file" in message.lower():
         return EXIT_ENVIRONMENT  # model / engine / parser library problems
@@ -268,7 +274,7 @@ def _check_error(msg, GLib, Gst):  # type: ignore[no-untyped-def]
     if msg is None or msg.type != Gst.MessageType.ERROR:
         return None
     err, debug = msg.parse_error()
-    domain = GLib.quark_to_string(err.domain)
+    domain = gst_error_domain(err.domain, GLib)
     log(f"pipeline error [{domain}] from {msg.src.get_name()}: {err.message} | {debug}")
     return classify_gst_error(domain, err.message)
 

@@ -11,6 +11,7 @@ from deepstream.app.ds_runner import (
     build_launch_string,
     choose_decode_path,
     classify_gst_error,
+    gst_error_domain,
     parse_args,
 )
 from services.api.probe import ProbeError, parse_ffprobe_output
@@ -162,3 +163,15 @@ def test_json_log_includes_context_and_extras():
 def test_runner_script_has_no_top_level_gst_import():
     """ds_runner must import under plain Python so it can be unit tested without DeepStream."""
     assert "import pyds" not in Path("deepstream/app/ds_runner.py").read_text().split("def ")[0]
+
+
+def test_gst_error_domain_accepts_str_and_quark() -> None:
+    class FakeGLib:
+        @staticmethod
+        def quark_to_string(q: int) -> str:
+            if not isinstance(q, int):
+                raise TypeError("Must be number, not str")
+            return "decoded"
+
+    assert gst_error_domain("gst-stream-error-quark", FakeGLib) == "gst-stream-error-quark"
+    assert gst_error_domain(42, FakeGLib) == "decoded"
