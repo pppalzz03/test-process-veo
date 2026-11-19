@@ -16,12 +16,13 @@ RUN python3 -m venv --system-site-packages /opt/venv
 # 9.x. NVIDIA's own script builds it from source (SBSA-aware); verified on the DGX Spark to yield
 # pyds 1.2.3. Needs outbound HTTPS to github.com at BUILD time; takes ~10-20 min, then is cached.
 # The built module lives in the script's venv, so expose it to /opt/venv through a .pth file.
-RUN cd /opt/nvidia/deepstream/deepstream && ./user_deepstream_python_apps_install.sh --build-bindings \
-    && PYDS_SO="$(find /opt/nvidia/deepstream -name 'pyds*.so' -path '*site-packages*' | head -n1)" \
-    && test -n "$PYDS_SO" \
-    && dirname "$PYDS_SO" > /opt/venv/lib/python3.12/site-packages/pyds_path.pth \
-    && /opt/venv/bin/python -c "import pyds; print('pyds', pyds.__file__)" \
-    && rm -rf /var/lib/apt/lists/*
+RUN cd /opt/nvidia/deepstream/deepstream && ./user_deepstream_python_apps_install.sh --build-bindings
+RUN set -eux; \
+    PYDS_SO="$(find /opt/nvidia/deepstream/ -path '*site-packages*' -name 'pyds*.so' | head -n1)"; \
+    echo "found: $PYDS_SO"; test -n "$PYDS_SO"; \
+    dirname "$PYDS_SO" > /opt/venv/lib/python3.12/site-packages/pyds_path.pth; \
+    cat /opt/venv/lib/python3.12/site-packages/pyds_path.pth; \
+    /opt/venv/bin/python -c "import pyds; print('pyds', pyds.__file__)"
 
 WORKDIR /app
 COPY pyproject.toml ./
