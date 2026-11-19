@@ -74,12 +74,17 @@ if [ "$CONTAINER_TEST" -eq 1 ]; then
   fi
   RUN=(docker run --rm --runtime=nvidia --gpus all
        -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video "$IMAGE")
+  # The image entrypoint re-splits its arguments, which breaks quoted `bash -lc '...'` commands
+  # (seen on 9.2: gst-inspect listed every plugin, python checks printed nothing). Bypass it for
+  # shell checks by overriding the entrypoint.
+  RUNSH=(docker run --rm --runtime=nvidia --gpus all
+         -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video --entrypoint bash "$IMAGE")
   echo "# GPU visible inside the container (a 'GB10 not yet supported' warning is documented as harmless)"
   run "${RUN[@]}" nvidia-smi -L
-  run "${RUN[@]}" bash -lc 'deepstream-app --version-all 2>&1 | head -20'
-  run "${RUN[@]}" bash -lc 'dpkg -l | grep -Ei "tensorrt|libnvinfer[0-9]* |cuda-toolkit|gstreamer1.0-tools " | head'
-  run "${RUN[@]}" bash -lc 'python3 --version; python3 -c "import pyds; print(\"pyds\", pyds.__file__)" 2>&1 | tail -1; python3 -c "import gi; print(\"gi ok\")" 2>&1 | tail -1; python3 -c "import pyservicemaker; print(\"pyservicemaker ok\")" 2>&1 | tail -1'
-  run "${RUN[@]}" bash -lc 'gst-inspect-1.0 nvv4l2decoder 2>&1 | head -3; gst-inspect-1.0 nvstreammux 2>&1 | head -3; gst-inspect-1.0 nvinfer 2>&1 | head -3; gst-inspect-1.0 nvtracker 2>&1 | head -3'
-  run "${RUN[@]}" bash -lc 'ls -l /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so /opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_*.yml 2>&1 | head; ls /opt/nvidia/deepstream/deepstream/sources/includes/nvdsinfer_custom_impl.h; ls /usr/src/tensorrt/bin/trtexec 2>&1'
+  run "${RUNSH[@]}" -lc 'deepstream-app --version-all 2>&1 | head -20'
+  run "${RUNSH[@]}" -lc 'dpkg -l | grep -Ei "tensorrt|libnvinfer[0-9]* |cuda-toolkit|gstreamer1.0-tools " | head'
+  run "${RUNSH[@]}" -lc 'python3 --version; python3 -c "import pyds; print(\"pyds\", pyds.__file__)" 2>&1 | tail -1; python3 -c "import gi; print(\"gi ok\")" 2>&1 | tail -1; python3 -c "import pyservicemaker; print(\"pyservicemaker ok\")" 2>&1 | tail -1'
+  run "${RUNSH[@]}" -lc 'gst-inspect-1.0 nvv4l2decoder 2>&1 | head -3; gst-inspect-1.0 nvstreammux 2>&1 | head -3; gst-inspect-1.0 nvinfer 2>&1 | head -3; gst-inspect-1.0 nvtracker 2>&1 | head -3'
+  run "${RUNSH[@]}" -lc 'ls -l /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so /opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_*.yml 2>&1 | head; ls /opt/nvidia/deepstream/deepstream/sources/includes/nvdsinfer_custom_impl.h; ls /usr/src/tensorrt/bin/trtexec 2>&1'
 fi
 echo; echo "# done (read-only; nothing was modified)"

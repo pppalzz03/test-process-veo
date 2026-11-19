@@ -12,6 +12,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3-venv g+
 # --system-site-packages so the container's GStreamer bindings (gi) and pyds are visible.
 RUN python3 -m venv --system-site-packages /opt/venv
 
+# pyds (DeepStream Python bindings) is NOT shipped in the 9.2 image and has no prebuilt wheel for
+# 9.x. NVIDIA's own script builds it from source (SBSA-aware); verified on the DGX Spark to yield
+# pyds 1.2.3. Needs outbound HTTPS to github.com at BUILD time; takes ~10-20 min, then is cached.
+# The built module lives in the script's venv, so expose it to /opt/venv through a .pth file.
+RUN cd /opt/nvidia/deepstream/deepstream && ./user_deepstream_python_apps_install.sh --build-bindings \
+    && PYDS_SO="$(find /opt/nvidia/deepstream -name 'pyds*.so' -path '*site-packages*' | head -n1)" \
+    && test -n "$PYDS_SO" \
+    && dirname "$PYDS_SO" > /opt/venv/lib/python3.12/site-packages/pyds_path.pth \
+    && /opt/venv/bin/python -c "import pyds; print('pyds', pyds.__file__)" \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY pyproject.toml ./
 COPY shared ./shared

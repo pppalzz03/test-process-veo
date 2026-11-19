@@ -110,7 +110,7 @@ complete only when all of these are true:
 - [ ] `nvidia-smi` shows GB10 and the driver; vLLM processes are listed and **unchanged**
 - [ ] `docker info` lists the `nvidia` runtime; `docker run --gpus all ... nvidia-smi -L` works
 - [ ] DeepStream image pulled; `deepstream-app --version-all` prints versions (record them here)
-- [ ] `python3 -c "import pyds"` works in the image (else see risk 2)
+- [x] `pyds` is absent from the 9.2 image; built from source via `user_deepstream_python_apps_install.sh --build-bindings` -> pyds 1.2.3 (verified on the Spark, 2026-11-19). `pyservicemaker` 0.0.1 is present but needs `pyyaml`.
 - [ ] `gst-inspect-1.0 nvv4l2decoder nvstreammux nvinfer nvtracker` all succeed
 - [ ] Tracker library and sample tracker YAML exist at the configured paths
 - [ ] `/opt/nvidia/deepstream/deepstream/sources/includes/nvdsinfer_custom_impl.h` exists
